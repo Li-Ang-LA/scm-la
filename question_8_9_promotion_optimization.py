@@ -463,211 +463,326 @@ if promotion_results:
     print()
 
 # ============================================================================
-# 9. 问题9：多个非连续促销活动的优化
+# 9. 问题9：多个非连续促销活动的优化 - 数学规划方法
 # ============================================================================
 """
 问题9：评估多个促销活动的效果（非连续月份）
-假设：
-- 促销不能在连续的月份进行
-- 每次促销都应用相同的促销效果
-- 目标：找到最优的促销数量和时机
 
-采用枚举法测试所有可能的非连续促销组合
+使用真正的数学规划方法：
+- 引入二进制变量X[t]表示第t月是否进行促销
+- 通过约束条件强制非连续性（t和t+1不能同时为1）
+- 在单个优化模型中同时优化促销决策和生产计划
+
+目标：最大化年度利润，同时优化促销时机
 """
 
 print("\n" + "="*80)
-print("问题9：多个非连续促销活动的优化")
+print("问题9：多个非连续促销活动的优化 - 数学规划方法")
 print("="*80)
 print()
 
-from itertools import combinations
+# 创建综合促销优化模型
+m_comprehensive = gp.Model("VeloMotion_Q9_MultiPromo_MathProgramming")
+m_comprehensive.setParam('OutputFlag', 1)
 
-def is_non_consecutive(promotion_months):
-    """检查促销月份是否为非连续"""
-    if len(promotion_months) <= 1:
-        return True
-    sorted_months = sorted(promotion_months)
-    for i in range(len(sorted_months) - 1):
-        if sorted_months[i+1] - sorted_months[i] == 1:
-            return False
-    return True
+# ============================================================================
+# 9.1 决策变量
+# ============================================================================
 
-# 存储所有有效的促销组合结果
-multi_promotion_results = {}
+# 促销决策变量 - 二进制变量
+X = m_comprehensive.addVars(num_months, name="Promotion", vtype=GRB.BINARY)  # X[t] = 1 if month t has promotion
 
-# 测试1个、2个、3个等促销的所有可能组合
-for num_promos in range(1, num_months + 1):
-    print(f"测试 {num_promos} 个促销的所有可能组合...")
+# 生产相关变量（与前面问题相同）
+P_comp = m_comprehensive.addVars(num_months, name="Production", lb=0)
+O_comp = m_comprehensive.addVars(num_months, name="Outsource", lb=0)
+W_comp = m_comprehensive.addVars(num_months, name="Workers", vtype=GRB.INTEGER, lb=0)
+H_comp = m_comprehensive.addVars(num_months, name="Hire", vtype=GRB.INTEGER, lb=0)
+L_comp = m_comprehensive.addVars(num_months, name="Layoff", vtype=GRB.INTEGER, lb=0)
+OT_comp = m_comprehensive.addVars(num_months, name="Overtime", lb=0)
+I_comp = m_comprehensive.addVars(num_months, name="Inventory", lb=0)
+B_comp = m_comprehensive.addVars(num_months, name="Backorder", lb=0)
 
-    valid_combinations = []
-    for combo in combinations(range(num_months), num_promos):
-        if is_non_consecutive(combo):
-            valid_combinations.append(combo)
+# 需求相关的连续变量（用于建模需求调整）
+D_adjusted = m_comprehensive.addVars(num_months, name="AdjustedDemand", lb=0)
 
-    print(f"  有效的非连续组合数: {len(valid_combinations)}")
+m_comprehensive.update()
 
-    best_profit_for_num = None
-    best_combo_for_num = None
+# ============================================================================
+# 9.2 约束条件
+# ============================================================================
 
-    for combo in valid_combinations:
-        # 创建多促销模型
-        m_multi = gp.Model(f"VeloMotion_Q9_MultiPromo")
-        m_multi.setParam('OutputFlag', 0)
+# -------- 9.2.1 非连续促销约束 --------
+# 如果第t个月有促销，第t+1个月就不能有促销
+for t in range(num_months - 1):
+    m_comprehensive.addConstr(
+        X[t] + X[t+1] <= 1,
+        name=f"NoConsecutivePromotion_t{t+1}"
+    )
 
-        # 决策变量
-        P_multi = m_multi.addVars(num_months, name="Production", lb=0)
-        O_multi = m_multi.addVars(num_months, name="Outsource", lb=0)
-        W_multi = m_multi.addVars(num_months, name="Workers", vtype=GRB.INTEGER, lb=0)
-        H_multi = m_multi.addVars(num_months, name="Hire", vtype=GRB.INTEGER, lb=0)
-        L_multi = m_multi.addVars(num_months, name="Layoff", vtype=GRB.INTEGER, lb=0)
-        OT_multi = m_multi.addVars(num_months, name="Overtime", lb=0)
-        I_multi = m_multi.addVars(num_months, name="Inventory", lb=0)
-        B_multi = m_multi.addVars(num_months, name="Backorder", lb=0)
+# -------- 9.2.2 需求调整约束 --------
+# 根据促销决策调整每个月的需求
+# 如果第t月有促销：D_adjusted[t] = demand[t] * (1 + 0.35)
+# 如果第t月无促销但t-1或t-2月有促销：D_adjusted[t] = demand[t] * (1 - 0.06*影响数)
 
-        m_multi.update()
+for t in range(num_months):
+    # 基础需求
+    base_demand = demand[t]
 
-        # 计算调整后的需求（考虑多个促销月份）
-        adjusted_demand_multi = []
-        for t in range(num_months):
-            if t in combo:
-                # 该月进行促销
-                adjusted_demand_multi.append(demand[t] * (1 + promotion_sales_increase))
-            elif any(t > promo_t and t <= promo_t + 2 for promo_t in combo):
-                # 该月处于某个促销的影响期
-                # 从所有相关的促销月份中汇总拉动
-                total_pull_back = 0
-                for promo_t in combo:
-                    if promo_t < t <= promo_t + 2:
-                        total_pull_back += demand[t] * demand_pull_forward
-                # 避免负需求
-                adjusted_demand_multi.append(max(demand[t] - total_pull_back, 0))
-            else:
-                adjusted_demand_multi.append(demand[t])
+    # 当前月促销的增长
+    if t < num_months:
+        promotion_boost = promotion_sales_increase * demand[t] * X[t]
+    else:
+        promotion_boost = 0
 
-        # 约束条件（与问题8相同逻辑）
-        for t in range(num_months):
-            supply_prev = initial_inventory if t == 0 else I_multi[t-1]
-            backorder_prev = 0 if t == 0 else B_multi[t-1]
+    # 后续月份的拉动效应：来自t-1月和t-2月的促销
+    pull_back = 0
+    if t >= 1:
+        pull_back += demand_pull_forward * demand[t] * X[t-1]
+    if t >= 2:
+        pull_back += demand_pull_forward * demand[t] * X[t-2]
 
-            m_multi.addConstr(
-                supply_prev + P_multi[t] + O_multi[t] + backorder_prev == adjusted_demand_multi[t] + I_multi[t] + B_multi[t],
-                name=f"InventoryBalance_t{t+1}"
-            )
+    # 调整后的需求 = 基础需求 + 促销增长 - 需求拉动
+    m_comprehensive.addConstr(
+        D_adjusted[t] == base_demand + promotion_boost - pull_back,
+        name=f"DemandAdjustment_t{t+1}"
+    )
 
-        for t in range(num_months):
-            workers_prev = initial_workers if t == 0 else W_multi[t-1]
-            m_multi.addConstr(
-                W_multi[t] == workers_prev + H_multi[t] - L_multi[t],
-                name=f"WorkerBalance_t{t+1}"
-            )
+    # 需求非负约束
+    m_comprehensive.addConstr(
+        D_adjusted[t] >= 0,
+        name=f"NonNegativeDemand_t{t+1}"
+    )
 
-        for t in range(num_months):
-            m_multi.addConstr(H_multi[t] <= max_hire_per_month, name=f"HireLimit_t{t+1}")
+# -------- 9.2.3 库存平衡约束 --------
+for t in range(num_months):
+    supply_prev = initial_inventory if t == 0 else I_comp[t-1]
+    backorder_prev = 0 if t == 0 else B_comp[t-1]
 
-        for t in range(num_months):
-            m_multi.addConstr(I_multi[t] <= max_inventory_capacity, name=f"CapacityLimit_t{t+1}")
+    m_comprehensive.addConstr(
+        supply_prev + P_comp[t] + O_comp[t] + backorder_prev == D_adjusted[t] + I_comp[t] + B_comp[t],
+        name=f"InventoryBalance_t{t+1}"
+    )
 
-        for t in range(num_months):
-            m_multi.addConstr(OT_multi[t] <= W_multi[t] * max_overtime_per_worker, name=f"OvertimeLimit_t{t+1}")
+# -------- 9.2.4 员工数量平衡约束 --------
+for t in range(num_months):
+    workers_prev = initial_workers if t == 0 else W_comp[t-1]
+    m_comprehensive.addConstr(
+        W_comp[t] == workers_prev + H_comp[t] - L_comp[t],
+        name=f"WorkerBalance_t{t+1}"
+    )
 
-        for t in range(num_months):
-            m_multi.addConstr(
-                W_multi[t] * hours_per_worker_per_month + OT_multi[t] >= P_multi[t] * labor_hours_per_unit,
-                name=f"ProductionCapacity_t{t+1}"
-            )
+# -------- 9.2.5 招聘限制 --------
+for t in range(num_months):
+    m_comprehensive.addConstr(
+        H_comp[t] <= max_hire_per_month,
+        name=f"HireLimit_t{t+1}"
+    )
 
-        m_multi.addConstr(B_multi[num_months - 1] == 0, name="EndNoBackorder")
+# -------- 9.2.6 库存容量限制 --------
+for t in range(num_months):
+    m_comprehensive.addConstr(
+        I_comp[t] <= max_inventory_capacity,
+        name=f"CapacityLimit_t{t+1}"
+    )
 
-        m_multi.update()
+# -------- 9.2.7 加班时间限制 --------
+for t in range(num_months):
+    m_comprehensive.addConstr(
+        OT_comp[t] <= W_comp[t] * max_overtime_per_worker,
+        name=f"OvertimeLimit_t{t+1}"
+    )
 
-        # 目标函数
-        revenue_multi = 0
-        for t in range(num_months):
-            if t in combo:
-                price_t = revenue_price * (1 - price_reduction_rate)
-            else:
-                price_t = revenue_price
-            revenue_multi += (P_multi[t] + O_multi[t]) * price_t
+# -------- 9.2.8 生产能力约束 --------
+for t in range(num_months):
+    m_comprehensive.addConstr(
+        W_comp[t] * hours_per_worker_per_month + OT_comp[t] >= P_comp[t] * labor_hours_per_unit,
+        name=f"ProductionCapacity_t{t+1}"
+    )
 
-        material_costs_multi = gp.quicksum(P_multi[t] * material_cost for t in range(num_months))
-        outsource_costs_multi = gp.quicksum(O_multi[t] * outsource_cost for t in range(num_months))
-        labor_regular_costs_multi = gp.quicksum(P_multi[t] * labor_hours_per_unit * wage_regular for t in range(num_months))
-        labor_overtime_costs_multi = gp.quicksum(OT_multi[t] * wage_overtime for t in range(num_months))
-        hire_costs_multi = gp.quicksum(H_multi[t] * hire_cost for t in range(num_months))
-        layoff_costs_multi = gp.quicksum(L_multi[t] * layoff_cost for t in range(num_months))
-        inventory_costs_multi = gp.quicksum(I_multi[t] * inventory_cost for t in range(num_months))
-        backorder_costs_multi = gp.quicksum(B_multi[t] * backorder_cost for t in range(num_months))
+# -------- 9.2.9 期末无积压 --------
+m_comprehensive.addConstr(
+    B_comp[num_months - 1] == 0,
+    name="EndNoBackorder"
+)
 
-        total_costs_multi = (material_costs_multi + outsource_costs_multi + labor_regular_costs_multi +
-                            labor_overtime_costs_multi + hire_costs_multi + layoff_costs_multi +
-                            inventory_costs_multi + backorder_costs_multi)
+m_comprehensive.update()
 
-        profit_multi = revenue_multi - total_costs_multi
-        m_multi.setObjective(profit_multi, GRB.MAXIMIZE)
+# ============================================================================
+# 9.3 目标函数
+# ============================================================================
 
-        m_multi.update()
-        m_multi.optimize()
+# 收入：考虑促销月份的价格折扣
+revenue_comprehensive = 0
+for t in range(num_months):
+    # 如果第t个月有促销，价格为 1250 * (1 - 0.05)
+    # 否则价格为 1250
+    price_t = revenue_price * (1 - price_reduction_rate * X[t])
+    revenue_comprehensive += (P_comp[t] + O_comp[t]) * price_t
 
-        if m_multi.status == GRB.OPTIMAL:
-            combo_profit = profit_multi.getValue()
-            if best_profit_for_num is None or combo_profit > best_profit_for_num:
-                best_profit_for_num = combo_profit
-                best_combo_for_num = combo
+# 成本
+material_costs_comp = gp.quicksum(P_comp[t] * material_cost for t in range(num_months))
+outsource_costs_comp = gp.quicksum(O_comp[t] * outsource_cost for t in range(num_months))
+labor_regular_costs_comp = gp.quicksum(P_comp[t] * labor_hours_per_unit * wage_regular for t in range(num_months))
+labor_overtime_costs_comp = gp.quicksum(OT_comp[t] * wage_overtime for t in range(num_months))
+hire_costs_comp = gp.quicksum(H_comp[t] * hire_cost for t in range(num_months))
+layoff_costs_comp = gp.quicksum(L_comp[t] * layoff_cost for t in range(num_months))
+inventory_costs_comp = gp.quicksum(I_comp[t] * inventory_cost for t in range(num_months))
+backorder_costs_comp = gp.quicksum(B_comp[t] * backorder_cost for t in range(num_months))
 
-    if best_combo_for_num is not None:
-        multi_promotion_results[num_promos] = {
-            'combo': best_combo_for_num,
-            'profit': best_profit_for_num,
-            'months': [months[m] for m in best_combo_for_num]
-        }
-        print(f"  最优组合: {[months[m] for m in best_combo_for_num]}")
-        print(f"  最优利润: €{best_profit_for_num:,.2f}")
-    print()
+total_costs_comp = (material_costs_comp + outsource_costs_comp + labor_regular_costs_comp +
+                    labor_overtime_costs_comp + hire_costs_comp + layoff_costs_comp +
+                    inventory_costs_comp + backorder_costs_comp)
 
-# 总结多促销分析
-print("="*80)
-print("问题9：多个促销活动的最优方案总结")
-print("="*80)
+# 利润最大化
+profit_comprehensive = revenue_comprehensive - total_costs_comp
+m_comprehensive.setObjective(profit_comprehensive, GRB.MAXIMIZE)
+
+m_comprehensive.update()
+
+# ============================================================================
+# 9.4 求解
+# ============================================================================
+
+print("\n求解综合促销优化模型（包含促销决策和生产计划）...")
+print("-" * 80)
+
+m_comprehensive.optimize()
+
+# ============================================================================
+# 9.5 输出结果
+# ============================================================================
+
 print()
-
-if multi_promotion_results:
-    print(f"{'促销数量':<15} {'促销月份':<40} {'年度利润(€)':<20}")
-    print("-" * 75)
-
-    for num_promos in sorted(multi_promotion_results.keys()):
-        result = multi_promotion_results[num_promos]
-        months_str = ", ".join(result['months'])
-        print(f"{num_promos:<15} {months_str:<40} {result['profit']:>18,.2f}")
-
+if m_comprehensive.status == GRB.OPTIMAL:
+    print("✓ 找到最优解！")
     print()
 
-    # 找到全局最优方案
-    best_overall = max(multi_promotion_results.items(), key=lambda x: x[1]['profit'])
-    num_best, best_result_overall = best_overall
+    # 提取促销决策
+    promotion_months_indices = [t for t in range(num_months) if X[t].X > 0.5]
+    promotion_months_names = [months[t] for t in promotion_months_indices]
+    num_promotions = len(promotion_months_indices)
 
-    print(f"全局最优方案:")
-    print(f"  促销数量: {num_best}")
-    print(f"  促销月份: {', '.join(best_result_overall['months'])}")
-    print(f"  年度利润: €{best_result_overall['profit']:,.2f}")
+    print("="*80)
+    print("问题9：多促销优化的最优方案（数学规划方法）")
+    print("="*80)
     print()
 
-    # 与基础模型和单促销对比
+    print(f"最优促销方案:")
+    print(f"  促销数量: {num_promotions}")
+    if num_promotions > 0:
+        print(f"  促销月份: {', '.join(promotion_months_names)}")
+    else:
+        print(f"  促销月份: 无（不进行任何促销）")
+    print()
+
+    # 获取数值
+    profit_comp_val = profit_comprehensive.getValue()
+    revenue_comp_val = revenue_comprehensive.getValue()
+    total_cost_comp_val = total_costs_comp.getValue()
+
+    print(f"财务指标:")
+    print(f"  年度利润: €{profit_comp_val:,.2f}")
+    print(f"  总收入:   €{revenue_comp_val:,.2f}")
+    print(f"  总成本:   €{total_cost_comp_val:,.2f}")
+    print()
+
+    # 与基础模型对比
     if m.status == GRB.OPTIMAL:
         base_profit = profit.getValue()
-        single_promo_profit = best_result['profit']
-        multi_promo_profit = best_result_overall['profit']
+        profit_improvement = profit_comp_val - base_profit
+        profit_improvement_pct = (profit_improvement / base_profit) * 100
 
-        print(f"与基础模型对比:")
-        print(f"  基础模型利润:    €{base_profit:,.2f}")
-        print(f"  单促销最优利润:  €{single_promo_profit:,.2f} ({(single_promo_profit - base_profit)/base_profit*100:+.2f}%)")
-        print(f"  多促销最优利润:  €{multi_promo_profit:,.2f} ({(multi_promo_profit - base_profit)/base_profit*100:+.2f}%)")
+        print(f"与基础模型（无促销）的对比:")
+        print(f"  基础模型利润:   €{base_profit:,.2f}")
+        print(f"  促销方案利润:   €{profit_comp_val:,.2f}")
+        print(f"  利润增长:      €{profit_improvement:,.2f} ({profit_improvement_pct:+.2f}%)")
+        print()
 
-        if multi_promo_profit > single_promo_profit:
-            improvement = multi_promo_profit - single_promo_profit
-            print()
-            print(f"多促销相比单促销的改进: €{improvement:,.2f} ({improvement/single_promo_profit*100:+.2f}%)")
-        else:
-            print()
-            print(f"单促销已是最优策略，多促销不会带来额外收益")
+    # 促销月份的详细信息
+    if num_promotions > 0:
+        print("促销月份详细信息:")
+        print("-" * 80)
+        print(f"{'月份':<15} {'原始需求':<15} {'调整后需求':<15} {'生产量':<15} {'库存':<15}")
+        print("-" * 80)
+
+        for t in promotion_months_indices:
+            print(f"{months[t]:<15} {int(demand[t]):<15} {int(D_adjusted[t].X):<15} {int(P_comp[t].X):<15} {int(I_comp[t].X):<15}")
+
+        print()
+
+    # 月度完整表
+    print("="*80)
+    print("月度生产计划（促销优化方案）")
+    print("="*80)
+    print()
+
+    results_data = []
+    for t in range(num_months):
+        results_data.append({
+            'Month': months[t],
+            'Promotion': 'Yes' if X[t].X > 0.5 else 'No',
+            'Demand': int(demand[t]),
+            'Adj_Demand': int(D_adjusted[t].X),
+            'Production': int(P_comp[t].X),
+            'Outsource': int(O_comp[t].X),
+            'Workers': int(W_comp[t].X),
+            'Inventory': int(I_comp[t].X),
+        })
+
+    df_comp = pd.DataFrame(results_data)
+    print(df_comp.to_string(index=False))
+    print()
+
+    # 成本结构分析
+    print("="*80)
+    print("成本结构分析（促销优化方案）")
+    print("="*80)
+    print()
+
+    cost_items_comp = [
+        ("原材料和零件成本", material_costs_comp.getValue()),
+        ("外部组装成本", outsource_costs_comp.getValue()),
+        ("正常工资成本", labor_regular_costs_comp.getValue()),
+        ("加班工资成本", labor_overtime_costs_comp.getValue()),
+        ("招聘成本", hire_costs_comp.getValue()),
+        ("裁员成本", layoff_costs_comp.getValue()),
+        ("库存成本", inventory_costs_comp.getValue()),
+        ("积压订单成本", backorder_costs_comp.getValue()),
+    ]
+
+    print(f"{'成本项目':<30} {'金额(€)':<20} {'占比(%)':<15}")
+    print("-" * 80)
+
+    for item_name, item_val in cost_items_comp:
+        pct = (item_val / total_cost_comp_val * 100) if total_cost_comp_val > 0 else 0
+        print(f"{item_name:<30} €{item_val:>18,.2f} {pct:>13.2f}%")
+
+    print("-" * 80)
+    print(f"{'总成本':<30} €{total_cost_comp_val:>18,.2f} {100.00:>13.2f}%")
+    print()
+
+    # 灵活性选项的使用
+    print("="*80)
+    print("灵活性选项使用统计")
+    print("="*80)
+    print()
+
+    total_production = sum(P_comp[t].X for t in range(num_months))
+    total_outsource = sum(O_comp[t].X for t in range(num_months))
+    total_demand_orig = sum(demand)
+    total_hire = sum(H_comp[t].X for t in range(num_months))
+    total_layoff = sum(L_comp[t].X for t in range(num_months))
+    total_overtime = sum(OT_comp[t].X for t in range(num_months))
+
+    print(f"总需求量（基础）:        {int(total_demand_orig):>10} 单位")
+    print(f"内部生产:              {int(total_production):>10} 单位 ({total_production/total_demand_orig*100:.1f}%)")
+    print(f"外部组装:              {int(total_outsource):>10} 单位 ({total_outsource/total_demand_orig*100:.1f}%)")
+    print(f"总招聘数:              {int(total_hire):>10} 人")
+    print(f"总裁员数:              {int(total_layoff):>10} 人")
+    print(f"总加班小时:            {int(total_overtime):>10} 小时")
+    print()
+
+else:
+    print(f"求解失败！状态码: {m_comprehensive.status}")
 
 print("\n" + "="*80)
